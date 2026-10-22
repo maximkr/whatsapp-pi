@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { SessionManager } from './src/services/session.manager.js';
 import { WhatsAppService } from './src/services/whatsapp.service.js';
@@ -126,19 +126,17 @@ export default function (pi: ExtensionAPI) {
                 await whatsappService.stop();
             }
         };
-        whatsappService.setIncomingMessageRecorder(async (message) => {
-            const isGroup = message.remoteJid.endsWith('@g.us');
-            const senderNumber = isGroup
-                ? message.remoteJid
-                : `+${message.remoteJid.split('@')[0]}`;
-            await recentsService.recordMessage({
+        whatsappService.setMessageRecorder(async messages => {
+            await recentsService.recordMessages(messages.map(message => ({
                 messageId: message.id,
-                senderNumber,
+                remoteJid: message.remoteJid,
+                senderNumber: message.remoteJid.endsWith('@g.us')
+                    ? message.remoteJid : `+${message.remoteJid.split('@')[0]}`,
                 senderName: message.pushName,
                 text: message.text || '',
-                direction: 'incoming',
+                direction: message.fromMe ? 'outgoing' as const : 'incoming' as const,
                 timestamp: message.timestamp
-            });
+            })));
         });
 
         const savedStateEntry = [...ctx.sessionManager.getEntries()]
@@ -526,11 +524,58 @@ export default function (pi: ExtensionAPI) {
     // Suppress automatic message_end reply when tool already sent
     // This is checked by the message_end handler below
 
+    pi.registerTool({
+        name: 'get_wa_status', label: 'WhatsApp connection status',
+        description: 'Inspect the actual WhatsApp connection, loaded patch revision, last live/history events and request state. Does not connect or send messages. Cached history alone does not prove a live connection.',
+        parameters: Type.Object({}),
+        async execute() {
+            const status = whatsappService.getDiagnostics();
+            return { details: status, content: [{ type: 'text' as const, text: JSON.stringify(status) }] };
+        }
+    });
+
+    pi.registerTool({
+        name: 'request_wa_history', label: 'Request WhatsApp history from phone',
+        description: 'Request history from your own primary phone, without replying to contacts. No anchor: request up to the last 2 days (WhatsApp may decline or not support it). With a real anchor key: fetch only messages OLDER than that anchor. Requested is not received; check get_wa_status/history afterwards. Requires an existing connected session.',
+        parameters: Type.Object({
+            days: Type.Optional(Type.Integer({ minimum: 1, maximum: 30 })),
+            chatJid: Type.Optional(Type.String({ description: 'Actual WhatsApp JID from message metadata, including @lid if present. Do not guess a phone number from LID digits.' })),
+            anchorMessageId: Type.Optional(Type.String()),
+            anchorTimestampMs: Type.Optional(Type.Integer({ minimum: 1000000000000 })),
+            anchorFromMe: Type.Optional(Type.Boolean()),
+            count: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 }))
+        }),
+        async execute(_id, params) {
+            try {
+                const anyAnchor = params.chatJid !== undefined || params.anchorMessageId !== undefined || params.anchorTimestampMs !== undefined || params.anchorFromMe !== undefined;
+                if (anyAnchor && (!params.chatJid || !params.anchorMessageId || !params.anchorTimestampMs || params.anchorFromMe === undefined)) throw new Error('Supply all anchor fields, or omit them all for a full-history request.');
+                const result = await whatsappService.requestHistory({ days: params.days, count: params.count,
+                    anchor: anyAnchor ? { key: { remoteJid: params.chatJid!, id: params.anchorMessageId!, fromMe: params.anchorFromMe! }, timestampMs: params.anchorTimestampMs! } : undefined });
+                return { details: result, content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+            } catch (error) {
+                return { isError: true, details: undefined, content: [{ type: 'text' as const, text: JSON.stringify({ status: 'not_requested', error: error instanceof Error ? error.message : String(error) }) }] };
+            }
+        }
+    });
+
     // Register commands
     pi.registerCommand("whatsapp", {
         description: t("command.whatsapp.description"),
         handler: async (args, ctx) => {
             _ctx = ctx;
+            if (args.trim() === 'status') {
+                ctx.ui.notify(JSON.stringify(whatsappService.getDiagnostics()), 'info');
+                return;
+            }
+            if (args.trim() === 'sync') {
+                try {
+                    const result = await whatsappService.requestHistory();
+                    ctx.ui.notify(`History requested (${result.requestId}); this is NOT confirmation of received history. Keep your phone online.`, 'info');
+                } catch (error) {
+                    ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
+                }
+                return;
+            }
             await menuHandler.handleCommand(ctx);
 
             // Persist state after changes

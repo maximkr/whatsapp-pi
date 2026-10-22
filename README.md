@@ -15,10 +15,11 @@ phone-history requests, atomic recent-message storage and replay-date protection
 The upstream sent-message retry cache and group/quoted-message behavior are retained.
 Targets the current `@earendil-works` Pi host packages; Baileys is pinned to `7.0.0-rc14`.
 
-**Install the tagged fork, not an edited copy inside node_modules:**
+**Install sync.2 or later, not an edited copy inside node_modules.**
+The preliminary sync.1 tag is superseded: it omitted the entrypoint wiring.
 
 ```sh
-pi install git:github.com/maximkr/whatsapp-pi@v1.0.72-sync.1
+pi install git:github.com/maximkr/whatsapp-pi@v1.0.72-sync.2
 ```
 
 Remove the old `npm:whatsapp-pi...` settings entry after confirming installation,

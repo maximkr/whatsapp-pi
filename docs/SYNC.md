@@ -64,7 +64,7 @@ Host Pi packages are peer dependencies. Do not bundle a second host runtime.
 Use git tags or full commit IDs in Pi settings:
 
 ```sh
-pi install git:github.com/maximkr/whatsapp-pi@v1.0.72-sync.1
+pi install git:github.com/maximkr/whatsapp-pi@v1.0.72-sync.2
 ```
 
 A full commit ID is the strongest pin. Ordinary package updates reconcile that checkout without advancing its configured ref. New fixes should be committed and tested in this fork, released under a new tag, then installed intentionally. Switching between npm and git sources must leave exactly one active WhatsApp-Pi package entry.
