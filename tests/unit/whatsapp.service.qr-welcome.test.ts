@@ -30,11 +30,13 @@ const baileysMocks = vi.hoisted(() => {
         sockets,
         makeWASocket: vi.fn((_config: any) => createSocket()),
         fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0] }),
+        fetchLatestWaWebVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
         makeCacheableSignalKeyStore: vi.fn((_keys: any, _logger: any) => _keys),
         reset() {
             sockets.length = 0;
             this.makeWASocket.mockReset().mockImplementation((_config: any) => createSocket());
             this.fetchLatestBaileysVersion.mockReset().mockResolvedValue({ version: [2, 3000, 0] });
+            this.fetchLatestWaWebVersion.mockReset().mockResolvedValue({ version: [2, 3000, 0], isLatest: true });
             this.makeCacheableSignalKeyStore.mockReset().mockImplementation((_keys: any, _logger: any) => _keys);
         }
     };
@@ -43,6 +45,7 @@ const baileysMocks = vi.hoisted(() => {
 vi.mock('baileys', () => ({
     makeWASocket: baileysMocks.makeWASocket,
     fetchLatestBaileysVersion: baileysMocks.fetchLatestBaileysVersion,
+    fetchLatestWaWebVersion: baileysMocks.fetchLatestWaWebVersion,
     makeCacheableSignalKeyStore: baileysMocks.makeCacheableSignalKeyStore,
     DisconnectReason: {
         loggedOut: 401,
@@ -123,7 +126,7 @@ describe('WhatsAppService QR welcome message', () => {
         await service.stop();
     });
 
-    it('provides sent messages to Baileys retry requests without fetching a WA version', async () => {
+    it('provides sent-message retry caching alongside the live Web version', async () => {
         const { WhatsAppService } = await import('../../src/services/whatsapp.service.ts');
         const sessionManager = createSessionManager();
         const service = new WhatsAppService(sessionManager as any);
@@ -136,7 +139,7 @@ describe('WhatsAppService QR welcome message', () => {
         await service.sendMessage('5511999998888@s.whatsapp.net', 'hello');
 
         const config = baileysMocks.makeWASocket.mock.calls[0][0];
-        expect(config.version).toBeUndefined();
+        expect(config.version).toEqual([2, 3000, 0]);
         expect(baileysMocks.fetchLatestBaileysVersion).not.toHaveBeenCalled();
         await expect(config.getMessage({ id: 'MSG123' })).resolves.toBe(sentMessage);
         await expect(config.getMessage({ id: 'MSG123', fromMe: false })).resolves.toBeUndefined();

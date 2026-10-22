@@ -1,20 +1,21 @@
 {
   "name": "whatsapp-pi",
-  "version": "1.0.71",
+  "version": "1.0.72-sync.1",
   "type": "module",
   "description": "WhatsApp integration extension for Pi",
   "main": "whatsapp-pi.ts",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/RaphaCastelloes/whatsapp-pi.git"
+    "url": "git+https://github.com/maximkr/whatsapp-pi.git"
   },
   "bugs": {
-    "url": "https://github.com/RaphaCastelloes/whatsapp-pi/issues"
+    "url": "https://github.com/maximkr/whatsapp-pi/issues"
   },
-  "homepage": "https://github.com/RaphaCastelloes/whatsapp-pi#readme",
+  "homepage": "https://github.com/maximkr/whatsapp-pi#readme",
   "files": [
     "whatsapp-pi.ts",
-    "src"
+    "src",
+    "docs/SYNC.md"
   ],
   "keywords": [
     "pi",
@@ -29,12 +30,17 @@
   "scripts": {
     "lint": "eslint whatsapp-pi.ts \"src/**/*.ts\" \"tests/**/*.ts\"",
     "test": "vitest run",
+    "test:sync": "node --test tests/sync-regression.mjs",
     "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "dependencies": {
     "@llamaindex/liteparse": "^1.5.3",
     "@sinclair/typebox": "^0.27.10",
-    "baileys": "^7.0.0-rc14",
+    "baileys": "7.0.0-rc14",
     "ffmpeg-static": "^5.3.0",
     "pino": "^10.3.1",
     "qrcode-terminal": "^0.12.0",
@@ -42,7 +48,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
-    "@mariozechner/pi-coding-agent": "latest",
+    "jiti": "2.7.0",
     "@types/node": "^20.11.0",
     "@types/qrcode-terminal": "^0.12.2",
     "@typescript-eslint/eslint-plugin": "^8.58.1",

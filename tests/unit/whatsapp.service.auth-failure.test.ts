@@ -24,11 +24,13 @@ const baileysMocks = vi.hoisted(() => {
         sockets,
         makeWASocket: vi.fn(() => createSocket()),
         fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0] }),
+        fetchLatestWaWebVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
         makeCacheableSignalKeyStore: vi.fn((_keys, _logger) => _keys),
         reset() {
             sockets.length = 0;
             this.makeWASocket.mockReset().mockImplementation(() => createSocket());
             this.fetchLatestBaileysVersion.mockReset().mockResolvedValue({ version: [2, 3000, 0] });
+            this.fetchLatestWaWebVersion.mockReset().mockResolvedValue({ version: [2, 3000, 0], isLatest: true });
             this.makeCacheableSignalKeyStore.mockReset().mockImplementation((_keys, _logger) => _keys);
         }
     };
@@ -37,6 +39,7 @@ const baileysMocks = vi.hoisted(() => {
 vi.mock('baileys', () => ({
     makeWASocket: baileysMocks.makeWASocket,
     fetchLatestBaileysVersion: baileysMocks.fetchLatestBaileysVersion,
+    fetchLatestWaWebVersion: baileysMocks.fetchLatestWaWebVersion,
     makeCacheableSignalKeyStore: baileysMocks.makeCacheableSignalKeyStore,
     DisconnectReason: {
         loggedOut: 401,
@@ -75,14 +78,14 @@ describe('WhatsAppService auth failure handling', () => {
         vi.restoreAllMocks();
     });
 
-    it('clears rejected saved auth and restarts pairing on manual connect failure', async () => {
+    it('clears rejected auth only when destructive recovery is explicitly opted in', async () => {
         const { WhatsAppService } = await import('../../src/services/whatsapp.service.ts');
         const sessionManager = createSessionManager();
         const service = new WhatsAppService(sessionManager as any);
         const statusCallback = vi.fn();
         service.setStatusCallback(statusCallback);
 
-        await service.start();
+        await service.start({ allowPairingOnAuthFailure: true });
         await baileysMocks.sockets[0].handlers.get('connection.update')!({
             connection: 'close',
             lastDisconnect: {

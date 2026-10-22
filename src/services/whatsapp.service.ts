@@ -1,8 +1,10 @@
 import {
     makeWASocket,
     DisconnectReason,
-    makeCacheableSignalKeyStore,
-    proto
+    fetchLatestBaileysVersion,
+    fetchLatestWaWebVersion,
+    proto,
+    makeCacheableSignalKeyStore
 } from 'baileys';
 import P from 'pino';
 import { SessionManager } from './session.manager.js';
@@ -44,6 +46,7 @@ interface IncomingMessageKey {
     remoteJid?: string;
     fromMe?: boolean;
     participant?: string;
+    remoteJidAlt?: string;
 }
 
 interface IncomingMessageContextInfo {
@@ -77,11 +80,16 @@ interface IncomingMessageLike {
     key: IncomingMessageKey;
     message?: IncomingMessageContent;
     pushName?: string;
-    messageTimestamp?: number | string;
+    messageTimestamp?: number | string | { toNumber(): number };
 }
+
+interface ContactMetadata { id: string; name?: string; notify?: string; lid?: string; phoneNumber?: string; }
+interface HistoryPayload { messages?: IncomingMessageLike[]; contacts?: ContactMetadata[]; chats?: Array<{ id: string; name?: string }>; progress?: number | null; syncType?: number | null; }
 
 interface MessagesUpsertEvent {
     messages?: IncomingMessageLike[];
+    type?: 'notify' | 'append';
+    requestId?: string;
 }
 
 interface GroupParticipantsUpdateEvent {
@@ -105,8 +113,12 @@ interface WhatsAppSocketLike {
         on(event: 'creds.update', handler: () => void | Promise<void>): void;
         on(event: 'messages.upsert', handler: (payload: MessagesUpsertEvent) => void | Promise<void>): void;
         on(event: 'group-participants.update', handler: (payload: GroupParticipantsUpdateEvent) => void | Promise<void>): void;
-        removeAllListeners(event: 'connection.update' | 'creds.update' | 'messages.upsert' | 'group-participants.update'): void;
+        on(event: 'messaging-history.set', handler: (payload: HistoryPayload) => void | Promise<void>): void;
+        on(event: 'contacts.upsert' | 'contacts.update', handler: (payload: ContactMetadata[]) => void | Promise<void>): void;
+        removeAllListeners(event: 'connection.update' | 'creds.update' | 'messages.upsert' | 'group-participants.update' | 'messaging-history.set' | 'contacts.upsert' | 'contacts.update'): void;
     };
+    fetchMessageHistory(count: number, key: IncomingMessageKey, timestampMs: number): Promise<string>;
+    sendPeerDataOperationMessage(message: unknown): Promise<string>;
     end(reason?: unknown): void;
     logout(): Promise<void>;
     sendMessage(jid: string, content: { text: string }): Promise<SentMessageLike | undefined>;
@@ -140,14 +152,53 @@ export class WhatsAppService {
     private isReconnecting = false;
     private reconnectAttempts = 0;
     private verboseMode = false;
-    private onIncomingMessageRecorded?: (message: IncomingMessage) => void | Promise<void>;
+    private onMessagesRecorded?: (messages: IncomingMessage[]) => void | Promise<void>;
+    private messageQueue: Promise<void> = Promise.resolve();
+    private readonly deliveredLiveMessages = new Set<string>();
+    private readonly contactNames = new Map<string, string>();
+    private diagnostics = {
+        revision: 'sync-v2-baileys7', pid: process.pid, loadedAt: Date.now(),
+        lastConnectedAt: 0, lastUpsertAt: 0, lastHistoryAt: 0,
+        receivedMessages: 0, historyMessages: 0, historyProgress: null as number | null,
+        webVersion: [] as number[], versionSource: '', lastDisconnectCode: null as number | null,
+        lastHistoryRequest: null as { id: string; at: number; coverage: string } | null
+    };
+
+    public getDiagnostics() {
+        return { ...this.diagnostics, status: this.getEffectiveStatus(), socketPresent: !!this.socket,
+            knownContactNames: this.contactNames.size, note: 'cached messages are not proof of current connection or complete history' };
+    }
+
+    public async requestHistory(options: { days?: number; count?: number; anchor?: { key: IncomingMessageKey; timestampMs: number } } = {}) {
+        if (this.getEffectiveStatus() !== 'connected' || !this.socket) throw new Error('WhatsApp is not connected. Use /whatsapp to connect first.');
+        if (this.diagnostics.lastHistoryRequest && Date.now() - this.diagnostics.lastHistoryRequest.at < 30_000) throw new Error('Wait 30 seconds before another history request.');
+        let id: string;
+        let coverage: string;
+        if (options.anchor) {
+            const { key, timestampMs } = options.anchor;
+            if (!key.id || !key.remoteJid || !/^\d+(?:-\d+)?@(lid|s\.whatsapp\.net|g\.us)$/.test(key.remoteJid) || !Number.isFinite(timestampMs) || timestampMs < 1_000_000_000_000) throw new Error('A real message key/JID and timestamp in milliseconds are required.');
+            id = await this.socket.fetchMessageHistory(Math.min(100, Math.max(1, options.count ?? 50)), key, timestampMs);
+            coverage = 'older_than_anchor_only';
+        } else {
+            const days = Math.min(30, Math.max(1, options.days ?? 2));
+            id = await this.socket.sendPeerDataOperationMessage({
+                peerDataOperationRequestType: proto.Message.PeerDataOperationRequestType.FULL_HISTORY_SYNC_ON_DEMAND,
+                fullHistorySyncOnDemandRequest: { requestMetadata: { requestId: `${process.pid}-${Date.now()}` },
+                    historySyncConfig: { fullSyncDaysLimit: days, recentSyncDaysLimit: days, fullSyncSizeMbLimit: 20 } }
+            });
+            coverage = 'phone_history_request_not_guaranteed';
+        }
+        this.diagnostics.lastHistoryRequest = { id, at: Date.now(), coverage };
+        fileLog(`History requested: ${coverage}`);
+        return { status: 'requested', requestId: id, coverage, note: 'Request sent to your own primary phone, not delivered history. Keep phone online; support/approval depends on WhatsApp.' };
+    }
     private saveCreds?: () => Promise<void>;
     private startPromise?: Promise<void>;
     private restoreBaileysConsoleFilter?: () => void;
     private reconnectTimeout?: ReturnType<typeof setTimeout>;
     private intentionalStop = false;
     private onQRCode?: (qr: string) => void;
-    private onMessage?: (m: MessagesUpsertEvent) => void;
+    private onMessage?: (m: MessagesUpsertEvent) => void | Promise<void>;
     private onStatusUpdate?: (status: string) => void;
     private lastRemoteJid: string | null = null;
     private qrWasShown = false;
@@ -186,7 +237,13 @@ export class WhatsAppService {
     }
 
     public setIncomingMessageRecorder(callback: (message: IncomingMessage) => void | Promise<void>) {
-        this.onIncomingMessageRecorded = callback;
+        this.onMessagesRecorded = async messages => {
+            for (const message of messages) await callback(message);
+        };
+    }
+
+    public setMessageRecorder(callback: (messages: IncomingMessage[]) => void | Promise<void>) {
+        this.onMessagesRecorded = callback;
     }
 
     public getSocket(): WhatsAppSocketLike | undefined {
@@ -385,6 +442,9 @@ export class WhatsAppService {
         this.socket.ev.removeAllListeners('creds.update');
         this.socket.ev.removeAllListeners('messages.upsert');
         this.socket.ev.removeAllListeners('group-participants.update');
+        this.socket.ev.removeAllListeners('messaging-history.set');
+        this.socket.ev.removeAllListeners('contacts.upsert');
+        this.socket.ev.removeAllListeners('contacts.update');
 
         try {
             this.socket.end(undefined);
@@ -409,30 +469,60 @@ export class WhatsAppService {
             await this.handleConnectionUpdate(update, options);
         });
 
-        socket.ev.on('messages.upsert', (payload) => {
-            void this.handleIncomingMessages(payload);
+        const enqueue = (work: () => Promise<void>) => {
+            this.messageQueue = this.messageQueue.then(async () => {
+                if (this.socket === socket) await work();
+            }).catch(error => {
+                fileLog(`Message import failed: ${this.getErrorMessage(error)}`);
+            });
+        };
+        socket.ev.on('messages.upsert', payload => {
+            enqueue(() => this.handleIncomingMessages(payload));
         });
-
+        socket.ev.on('messaging-history.set', payload => {
+            enqueue(() => this.handleHistoryMessages(payload));
+        });
         socket.ev.on('group-participants.update', ({ id }) => {
             this.groupMetadataCache.delete(id);
         });
+        for (const event of ['contacts.upsert', 'contacts.update'] as const) {
+            socket.ev.on(event, contacts => {
+                for (const contact of contacts) {
+                    const name = contact.name || contact.notify;
+                    if (contact.id && name) this.contactNames.set(contact.id, name);
+                }
+            });
+        }
     }
 
     private async createSocket(): Promise<WhatsAppSocketLike> {
         const { state, saveCreds } = await this.sessionManager.getAuthState();
         this.saveCreds = saveCreds;
+        let resolved = await fetchLatestWaWebVersion({ signal: AbortSignal.timeout(10_000) });
+        this.diagnostics.versionSource = 'whatsapp-web';
+        if (!resolved.isLatest) {
+            resolved = await fetchLatestBaileysVersion({ signal: AbortSignal.timeout(10_000) });
+            this.diagnostics.versionSource = 'baileys-fallback';
+        }
+        const { version } = resolved;
+        this.diagnostics.webVersion = [...version];
+        fileLog(`Socket start: sync-v2-baileys7 pid=${process.pid} version=${version.join('.')} source=${this.diagnostics.versionSource}`);
 
         const logger = P({ level: this.verboseMode ? 'trace' : 'silent' });
 
         const groupMetadataCache = this.groupMetadataCache;
 
         const socket = makeWASocket({
+            version,
             printQRInTerminal: false,
             auth: {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger)
             },
-            syncFullHistory: false,
+            // Accept history supplied by the phone. Reconnect does not guarantee a full replay.
+            syncFullHistory: true,
+            // Preserve the default Chrome profile; forcing Desktop caused 428 in live probes.
+            markOnlineOnConnect: false,
             logger,
             getMessage: async key => key.fromMe === false ? undefined : this.getCachedSentMessage(key.id),
             cachedGroupMetadata: async (jid: string) => {
@@ -496,16 +586,16 @@ export class WhatsAppService {
                 console.log = originalConsoleLog;
                 console.warn = originalConsoleWarn;
                 console.error = originalConsoleError;
-                if (socketInitialized) {
-                    this.restoreBaileysConsoleFilter = installBaileysConsoleFilter(this.verboseMode);
-                }
+            }
+            if (socketInitialized) {
+                this.restoreBaileysConsoleFilter = installBaileysConsoleFilter(this.verboseMode);
             }
         }
     }
 
     private async handleConnectionUpdate(update: ConnectionUpdateEvent, options: WhatsAppStartOptions) {
         const { connection, lastDisconnect, qr } = update;
-        const allowPairingOnAuthFailure = options.allowPairingOnAuthFailure ?? true;
+        const allowPairingOnAuthFailure = options.allowPairingOnAuthFailure ?? false;
 
         if (this.verboseMode) {
             fileLog(`[connection.update] connection=${connection}, hasDisconnect=${!!lastDisconnect}, qr=${!!qr}, isReconnecting=${this.isReconnecting}`);
@@ -559,6 +649,9 @@ export class WhatsAppService {
         await this.saveCreds?.();
         await this.sessionManager.markAuthStateAvailable();
         await this.sessionManager.setStatus('connected');
+        this.diagnostics.lastConnectedAt = Date.now();
+        this.diagnostics.lastDisconnectCode = null;
+        fileLog(`Connected: sync-v2-baileys7 pid=${process.pid}`);
         this.onStatusUpdate?.(t('service.whatsapp.connected'));
 
         if (this.qrWasShown) {
@@ -602,6 +695,8 @@ export class WhatsAppService {
         options: WhatsAppStartOptions
     ) {
         const statusCode = this.getDisconnectStatusCode(lastDisconnect?.error);
+        this.diagnostics.lastDisconnectCode = statusCode ?? null;
+        fileLog(`Connection closed: pid=${process.pid} code=${statusCode ?? 'unknown'} intentional=${this.intentionalStop}`);
         const errorMessage = this.getErrorMessage(lastDisconnect?.error);
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
         const isBadMac = this.isBadMacError(errorMessage);
@@ -689,113 +784,94 @@ export class WhatsAppService {
     }
 
     private extractText(message: IncomingMessageContent | undefined): string {
-        return message?.conversation || message?.extendedTextMessage?.text || '';
+        if (!message) return '';
+        const resolved = extractIncomingText(message);
+        return ['system', 'unsupported', 'reaction'].includes(resolved.kind) ? '' : resolved.text;
     }
 
     private isPiGeneratedMessage(text: string): boolean {
         return text.endsWith('π');
     }
 
-    private getIncomingTimestamp(timestamp: number | string | undefined): number {
-        if (typeof timestamp === 'number') {
-            return timestamp;
-        }
-
-        if (typeof timestamp === 'string') {
-            const parsed = Number(timestamp);
-            return Number.isFinite(parsed) ? parsed : Date.now();
-        }
-
-        return Date.now();
+    private getIncomingTimestamp(timestamp: IncomingMessageLike['messageTimestamp']): number | undefined {
+        const value = typeof timestamp === 'object' ? timestamp?.toNumber() : Number(timestamp);
+        return Number.isFinite(value) && value! > 0 ? value : undefined;
     }
 
-    private async recordIncomingMessage(message: IncomingMessageLike, remoteJid: string, text: string) {
-        // Extract quote information and original message (for reactions) from the message
-        const resolved = extractIncomingText(message.message, this.recentsService);
-        const quotedMessage = 'quotedMessage' in resolved ? resolved.quotedMessage : undefined;
-
-        // Don't record reactions in the recents store - they are events about existing messages
-        if (resolved.kind === 'reaction') {
-            return;
+    private async recordMessageBatch(messages: IncomingMessageLike[]): Promise<void> {
+        const records: IncomingMessage[] = [];
+        for (const message of messages) {
+            const remoteJid = message.key?.remoteJid;
+            if (!remoteJid || !message.key.id) continue;
+            if (!/@(s\.whatsapp\.net|lid|g\.us)$/.test(remoteJid)) continue;
+            if (this.boundGroupJid && remoteJid !== this.boundGroupJid) continue;
+            const text = this.extractText(message.message);
+            const timestamp = this.getIncomingTimestamp(message.messageTimestamp);
+            // Never date old history as "now" when the timestamp is missing/invalid.
+            if (!text.trim() || timestamp === undefined) continue;
+            const resolved = extractIncomingText(message.message, this.recentsService);
+            records.push({ id: message.key.id, remoteJid, fromMe: !!message.key.fromMe,
+                pushName: this.contactNames.get(remoteJid) || (message.key.fromMe ? undefined : message.pushName || undefined),
+                text, timestamp, quotedMessage: 'quotedMessage' in resolved ? resolved.quotedMessage : undefined });
         }
+        if (records.length) await this.onMessagesRecorded?.(records);
+    }
 
-        void Promise.resolve(this.onIncomingMessageRecorded?.({
-            id: message.key.id ?? remoteJid,
-            remoteJid,
-            pushName: message.pushName || undefined,
-            text,
-            timestamp: this.getIncomingTimestamp(message.messageTimestamp),
-            quotedMessage
-        })).catch(error => {
-            if (this.verboseMode) {
-                console.error(t('service.whatsapp.failedRecordRecentMessage'), error);
-            }
-        });
+    public async handleHistoryMessages(payload: HistoryPayload): Promise<void> {
+        // History is storage-only: no read receipts, typing indicators or agent callbacks.
+        this.diagnostics.lastHistoryAt = Date.now();
+        this.diagnostics.historyMessages += payload.messages?.length ?? 0;
+        this.diagnostics.historyProgress = payload.progress ?? null;
+        for (const contact of [...(payload.contacts ?? []), ...(payload.chats ?? [])]) {
+            const name = contact.name || ('notify' in contact && typeof contact.notify === 'string' ? contact.notify : undefined);
+            if (contact.id && name) this.contactNames.set(contact.id, name);
+        }
+        await this.recordMessageBatch(payload.messages ?? []);
+        fileLog(`History batch processed: ${(payload.messages ?? []).length} received`);
     }
 
     public async handleIncomingMessages(payload: MessagesUpsertEvent) {
-        if (this.sessionManager.getStatus() !== 'connected') return;
-
-        const message = payload.messages?.[0];
-        if (!message || !message.key.remoteJid) return;
-
-        const text = this.extractText(message.message);
-        if (this.isPiGeneratedMessage(text)) return;
-
-        const remoteJid = message.key.remoteJid;
-        const isGroup = remoteJid.endsWith('@g.us');
-
-        if (this.boundGroupJid) {
-            // Group-only mode narrows the source before allow-list checks run.
-            if (remoteJid !== this.boundGroupJid) return;
-        }
-
-        // Eagerly cache group metadata on incoming messages so it's
-        // available for sender-key encryption when we reply
-        if (isGroup) {
-            void this.prepareGroupSession(remoteJid);
-        }
-
-        const senderJid = isGroup
-            ? remoteJid
-            : this.normalizeContactNumber(remoteJid.split('@')[0]);
-        
-        // Process the message with full context (including reaction lookup)
-        const resolved = extractIncomingText(message.message, this.recentsService);
-        const displayText = resolved.text;
-        
-        void this.recordIncomingMessage(message, remoteJid, displayText);
-
-        const pushName = message.pushName || undefined;
-
-        if (this.boundGroupJid) {
-            if (!this.sessionManager.isAllowedGroup(this.boundGroupJid)) {
-                await this.sessionManager.trackIgnoredNumber(this.boundGroupJid, pushName);
-                return;
+        const messages = payload.messages ?? [];
+        this.diagnostics.lastUpsertAt = Date.now();
+        this.diagnostics.receivedMessages += messages.length;
+        await this.recordMessageBatch(messages);
+        // append and phone-resend batches must never replay old prompts into the agent.
+        if (payload.type !== 'notify' || payload.requestId || this.sessionManager.getStatus() !== 'connected') return;
+        for (const message of messages) {
+            const remoteJid = message.key?.remoteJid;
+            if (!remoteJid || !message.key.id || message.key.fromMe) continue;
+            if (!/@(s\.whatsapp\.net|lid|g\.us)$/.test(remoteJid)) continue;
+            if (this.boundGroupJid && remoteJid !== this.boundGroupJid) continue;
+            const resolved = extractIncomingText(message.message, this.recentsService);
+            const text = resolved.kind === 'system' || resolved.kind === 'unsupported' ? '' : resolved.text;
+            if (!text || this.isPiGeneratedMessage(text)) continue;
+            const deliveryKey = `${remoteJid}:${message.key.id}`;
+            if (this.deliveredLiveMessages.has(deliveryKey)) continue;
+            this.deliveredLiveMessages.add(deliveryKey);
+            if (this.deliveredLiveMessages.size > 2000) {
+                this.deliveredLiveMessages.delete(this.deliveredLiveMessages.values().next().value!);
             }
-
+            const isGroup = remoteJid.endsWith('@g.us');
+            const senderJid = isGroup ? remoteJid : this.normalizeContactNumber(remoteJid.split('@')[0]);
+            const allowed = this.boundGroupJid
+                ? this.sessionManager.isAllowedGroup(this.boundGroupJid)
+                : this.sessionManager.isConversationAllowed(senderJid);
+            if (!allowed) {
+                await this.sessionManager.trackIgnoredNumber(senderJid, message.pushName || undefined);
+                continue;
+            }
+            if (isGroup) void this.prepareGroupSession(remoteJid);
             this.lastRemoteJid = remoteJid;
-            this.onMessage?.(payload);
-            return;
+            // The consumer expects one message, so deliver each element separately.
+            await this.onMessage?.({ ...payload, messages: [message] });
         }
-
-        if (!this.sessionManager.isConversationAllowed(senderJid)) {
-            if (this.isVerbose()) {
-                console.log(t('service.whatsapp.ignoredNotAllowed', { senderJid }));
-            }
-            await this.sessionManager.trackIgnoredNumber(senderJid, pushName);
-            return;
-        }
-
-        this.lastRemoteJid = remoteJid;
-        this.onMessage?.(payload);
     }
 
     setQRCodeCallback(callback: (qr: string) => void) {
         this.onQRCode = callback;
     }
 
-    setMessageCallback(callback: (m: MessagesUpsertEvent) => void) {
+    setMessageCallback(callback: (m: MessagesUpsertEvent) => void | Promise<void>) {
         this.onMessage = callback;
     }
 

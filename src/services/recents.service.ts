@@ -1,4 +1,8 @@
-import { readFile, writeFile } from 'fs/promises';
+import { readFile, writeFile, rename, unlink } from 'fs/promises';
+import { randomUUID } from 'crypto';
+
+// Serialize read/modify/write within this process, including multiple service instances.
+const storeQueues = new Map<string, Promise<void>>();
 import { createStoragePaths, ensureStorageDirectories as ensureStorageRoots, migrateLegacyStorage } from './storage-path.js';
 import type {
     MessageDirection,
@@ -9,6 +13,7 @@ import type {
 import { SessionManager } from './session.manager.js';
 
 export interface RecentsMessageInput {
+    remoteJid?: string;
     messageId: string;
     senderNumber: string;
     senderName?: string;
@@ -18,16 +23,31 @@ export interface RecentsMessageInput {
 }
 
 export class RecentsService {
-    private readonly storagePaths = createStoragePaths();
-    private readonly dataDir = this.storagePaths.recentsDir;
-    private readonly storePath = this.storagePaths.recentsPath;
+    private readonly storagePaths: ReturnType<typeof createStoragePaths>;
+    private readonly dataDir: string;
+    private readonly storePath: string;
     private store: RecentsStore = {
         conversations: [],
         messagesBySender: {},
         updatedAt: Date.now()
     };
 
-    constructor(private readonly sessionManager: SessionManager) {}
+    constructor(private readonly sessionManager: SessionManager, paths = createStoragePaths()) {
+        this.storagePaths = paths;
+        this.dataDir = paths.recentsDir;
+        this.storePath = paths.recentsPath;
+    }
+
+    private withStoreQueue<T>(operation: () => Promise<T>): Promise<T> {
+        const previous = storeQueues.get(this.storePath) ?? Promise.resolve();
+        const result = previous.then(operation);
+        const tail = result.then(() => {}, () => {});
+        storeQueues.set(this.storePath, tail);
+        void tail.then(() => {
+            if (storeQueues.get(this.storePath) === tail) storeQueues.delete(this.storePath);
+        });
+        return result;
+    }
 
     async ensureInitialized() {
         await ensureStorageRoots({
@@ -57,7 +77,9 @@ export class RecentsService {
             };
 
             this.rebuildConversationState();
-        } catch {
+        } catch (error) {
+            // Do not silently overwrite a damaged or unreadable existing store.
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
             this.store = {
                 conversations: [],
                 messagesBySender: {},
@@ -148,13 +170,19 @@ export class RecentsService {
 
     private async persistStore() {
         this.store.updatedAt = Date.now();
-        await writeFile(this.storePath, JSON.stringify(this.store, null, 2));
+        const temporaryPath = `${this.storePath}.${process.pid}.${randomUUID()}.tmp`;
+        try {
+            await writeFile(temporaryPath, JSON.stringify(this.store, null, 2));
+            await rename(temporaryPath, this.storePath);
+        } finally {
+            await unlink(temporaryPath).catch(() => {});
+        }
     }
 
     private normalizeNumber(input: string): string {
         // Group JIDs should be stored as-is
         if (input.endsWith('@g.us')) return input;
-        const cleaned = input.replace(/@s\.whatsapp\.net$/, '');
+        const cleaned = input.replace(/@(s\.whatsapp\.net|lid)$/, '');
         if (cleaned.startsWith('+')) {
             return cleaned;
         }
@@ -169,6 +197,24 @@ export class RecentsService {
     }
 
     async recordMessage(input: RecentsMessageInput) {
+        await this.recordMessages([input]);
+    }
+
+    async recordMessages(inputs: RecentsMessageInput[]) {
+        const usableInputs = inputs.filter(input => input.messageId && Number.isFinite(input.timestamp)
+            && input.timestamp > 0 && this.stripSpecialCharacters(input.text).length > 0);
+        if (!usableInputs.length) return;
+        await this.withStoreQueue(async () => {
+            // Another Pi instance may have updated the file since initialization.
+            await this.loadStore();
+            for (const input of usableInputs) this.applyMessage(input);
+            this.rebuildConversationState();
+            await this.persistStore();
+        });
+    }
+
+    private applyMessage(input: RecentsMessageInput) {
+        if (!input.messageId || !Number.isFinite(input.timestamp) || input.timestamp <= 0) return;
         const senderNumber = this.normalizeNumber(input.senderNumber);
         if (!senderNumber) return;
 
@@ -177,12 +223,17 @@ export class RecentsService {
         if (!normalizedText) return;
 
         const existing = this.store.messagesBySender[senderNumber] ?? [];
+        const previous = existing.find(message => message.messageId === input.messageId);
+        // Phone placeholder replays may carry "now" for an old message. Preserve
+        // the earliest known original date; a duplicate is not fresh activity.
+        const originalTimestamp = previous ? Math.min(previous.timestamp, normalizedTimestamp) : normalizedTimestamp;
         const nextMessage: RecentConversationMessage = {
+            remoteJid: input.remoteJid ?? previous?.remoteJid,
             messageId: input.messageId,
             senderNumber,
             text: normalizedText,
             direction: input.direction,
-            timestamp: normalizedTimestamp
+            timestamp: originalTimestamp
         };
 
         const filtered = existing.filter(message => message.messageId !== nextMessage.messageId);
@@ -208,20 +259,22 @@ export class RecentsService {
             ...this.store.conversations.filter(item => item.senderNumber !== senderNumber)
         ]).slice(0, 20);
 
-        await this.persistStore();
     }
 
     async getRecentConversations(): Promise<RecentConversationSummary[]> {
-        this.rebuildConversationState();
-        return [...this.store.conversations];
+        return this.withStoreQueue(async () => {
+            await this.loadStore();
+            return [...this.store.conversations];
+        });
     }
 
     async getConversationHistory(senderNumber: string): Promise<RecentConversationMessage[]> {
-        const normalizedNumber = this.normalizeNumber(senderNumber);
-        const messages = this.store.messagesBySender[normalizedNumber] ?? [];
-        return [...messages]
-            .sort((left, right) => left.timestamp - right.timestamp)
-            .slice(-20);
+        return this.withStoreQueue(async () => {
+            await this.loadStore();
+            const normalizedNumber = this.normalizeNumber(senderNumber);
+            const messages = this.store.messagesBySender[normalizedNumber] ?? [];
+            return [...messages].sort((left, right) => left.timestamp - right.timestamp).slice(-20);
+        });
     }
 
     async hasRecentConversations(): Promise<boolean> {

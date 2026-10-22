@@ -7,7 +7,10 @@ const noisyBaileysPatterns = [
     t('baileys.filter.sessionError'),
     t('baileys.filter.badMac'),
     t('baileys.filter.closingOpenSession'),
-    t('baileys.filter.closingSession')
+    t('baileys.filter.closingSession'),
+    // libsignal logs are English regardless of the selected extension locale.
+    'Failed to decrypt message with any known session', 'Session error:',
+    'Closing open session', 'Closing session:', 'Removing old closed session'
 ];
 
 const stringifyConsolePart = (part: unknown): string => {
@@ -32,10 +35,6 @@ export const shouldSuppressBaileysConsoleMessage = (args: unknown[]): boolean =>
 };
 
 export const installBaileysConsoleFilter = (verbose: boolean): (() => void) => {
-    if (verbose) {
-        return () => {};
-    }
-
     const methods: ConsoleMethod[] = ['log', 'info', 'warn', 'error'];
     const originals = new Map<ConsoleMethod, (...args: any[]) => void>();
     const patched = new Map<ConsoleMethod, (...args: any[]) => void>();
@@ -45,9 +44,12 @@ export const installBaileysConsoleFilter = (verbose: boolean): (() => void) => {
         originals.set(method, original);
 
         const replacement = (...args: unknown[]) => {
-            if (shouldSuppressBaileysConsoleMessage(args)) {
-                return;
-            }
+            // Never expose SessionEntry/key material, even in verbose mode.
+            const sensitiveDump = args.some(arg => {
+                if (typeof arg === 'string') return /Closing (?:open )?session|SessionEntry|Removing old closed session/.test(arg);
+                return !!arg && typeof arg === 'object' && ('currentRatchet' in arg || 'privKey' in arg || 'rootKey' in arg);
+            });
+            if (sensitiveDump || (!verbose && shouldSuppressBaileysConsoleMessage(args))) return;
 
             original(...args);
         };

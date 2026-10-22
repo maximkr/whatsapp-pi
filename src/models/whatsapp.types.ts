@@ -17,6 +17,7 @@ export interface QuotedMessageInfo {
 }
 
 export interface IncomingMessage {
+    fromMe?: boolean;
     id: string;
     remoteJid: string;
     pushName?: string;
@@ -63,6 +64,7 @@ export interface DocumentMetadata {
 export type MessageDirection = 'incoming' | 'outgoing';
 
 export interface RecentConversationMessage {
+    remoteJid?: string;
     messageId: string;
     senderNumber: string;
     text: string;

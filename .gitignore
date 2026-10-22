@@ -23,9 +23,23 @@ Thumbs.db
 # Pi Extension Data
 .pi/extensions/whatsapp/auth/
 .pi-data/
-package-lock.json
 .playwright-mcp
 .pi/loops/
+
+# Private runtime data: NEVER publish account keys, conversations, QR or backups.
+auth/
+auth-*/
+pairing*/
+recents/
+whatsapp-medias/
+backups/
+**/creds.json
+**/recents.json
+**/reader-status.json
+**/pairing*.svg
+**/pairing*.png
+**/pairing.html
+*.tgz
 
 # Tesseract OCR (auto-downloaded by LiteParse)
 *.traineddata

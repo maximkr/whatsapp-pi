@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
         setVerboseMode: vi.fn(),
         setStatusCallback: vi.fn(),
         setIncomingMessageRecorder: vi.fn(),
+        setMessageRecorder: vi.fn(),
         setMessageCallback: vi.fn(),
         setGroupBinding: vi.fn(),
         setRecentsService: vi.fn(),
@@ -35,7 +36,8 @@ const mocks = vi.hoisted(() => {
 
     const createRecentsService = () => ({
         ensureInitialized: vi.fn().mockResolvedValue(undefined),
-        recordMessage: vi.fn().mockResolvedValue(undefined)
+        recordMessage: vi.fn().mockResolvedValue(undefined),
+        recordMessages: vi.fn().mockResolvedValue(undefined)
     });
 
     const createMenuHandler = () => ({

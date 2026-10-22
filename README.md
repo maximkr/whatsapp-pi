@@ -3,6 +3,33 @@
 </p>
 
 # WhatsApp-Pi
+
+## Sync-reliability fork
+
+This is [maximkr/whatsapp-pi](https://github.com/maximkr/whatsapp-pi), a fork of
+[RaphaCastelloes/whatsapp-pi](https://github.com/RaphaCastelloes/whatsapp-pi).
+Original authorship and the upstream MIT license declaration are retained.
+
+It adds safe batched history import, actual connection diagnostics, bounded
+phone-history requests, atomic recent-message storage and replay-date protection.
+The upstream sent-message retry cache and group/quoted-message behavior are retained.
+Targets the current `@earendil-works` Pi host packages; Baileys is pinned to `7.0.0-rc14`.
+
+**Install the tagged fork, not an edited copy inside node_modules:**
+
+```sh
+pi install git:github.com/maximkr/whatsapp-pi@v1.0.72-sync.1
+```
+
+Remove the old `npm:whatsapp-pi...` settings entry after confirming installation,
+so only one copy loads. Then `/reload` and `/whatsapp` to connect.
+Tags/commit-pinned installs do not move to a newer upstream revision on ordinary
+package updates. Never edit the managed checkout to maintain custom changes:
+commit fixes to this fork and deliberately install a new tag/commit.
+
+Read [sync behavior, recovery and security](docs/SYNC.md). Local credentials and
+history stay in your existing user-data directory; they are **never** in this repo.
+
 [![GitHub](https://img.shields.io/badge/github-repo-black.svg?style=flat-square&logo=github)](https://github.com/RaphaCastelloes/whatsapp-pi)
 
 A WhatsApp integration extension for the **[Pi Coding Agent](https://pi.dev)**. 

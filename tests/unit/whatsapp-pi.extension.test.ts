@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => {
         setVerboseMode: vi.fn(),
         setStatusCallback: vi.fn(),
         setIncomingMessageRecorder: vi.fn(),
+        setMessageRecorder: vi.fn(),
+        getDiagnostics: vi.fn().mockReturnValue({ status: 'connected' }),
         setMessageCallback: vi.fn(),
         setGroupBinding: vi.fn(),
         setRecentsService: vi.fn(),
@@ -36,7 +38,8 @@ const mocks = vi.hoisted(() => {
 
     const createRecentsService = () => ({
         ensureInitialized: vi.fn().mockResolvedValue(undefined),
-        recordMessage: vi.fn().mockResolvedValue(undefined)
+        recordMessage: vi.fn().mockResolvedValue(undefined),
+        recordMessages: vi.fn().mockResolvedValue(undefined)
     });
 
     const createMenuHandler = () => ({
@@ -220,7 +223,7 @@ describe('whatsapp-pi extension', () => {
         expect(mocks.recentsService.ensureInitialized).toHaveBeenCalledOnce();
         expect(mocks.sessionManager.setStatus).toHaveBeenCalledWith('disconnected');
         expect(mocks.sessionManager.addNumber).toHaveBeenCalledWith('+5511999998888', 'Ana');
-        expect(mocks.whatsappService.setIncomingMessageRecorder).toHaveBeenCalledOnce();
+        expect(mocks.whatsappService.setMessageRecorder).toHaveBeenCalledOnce();
         expect(pi.exec).not.toHaveBeenCalled();
     });
 

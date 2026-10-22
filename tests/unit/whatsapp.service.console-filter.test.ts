@@ -20,6 +20,7 @@ const baileysMocks = vi.hoisted(() => {
 vi.mock('baileys', () => ({
     makeWASocket: baileysMocks.makeWASocket,
     fetchLatestBaileysVersion: baileysMocks.fetchLatestBaileysVersion,
+    fetchLatestWaWebVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
     makeCacheableSignalKeyStore: baileysMocks.makeCacheableSignalKeyStore,
     DisconnectReason: {
         loggedOut: 401,

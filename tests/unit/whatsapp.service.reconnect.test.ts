@@ -25,11 +25,13 @@ const baileysMocks = vi.hoisted(() => {
         sockets,
         makeWASocket: vi.fn(() => createSocket()),
         fetchLatestBaileysVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0] }),
+        fetchLatestWaWebVersion: vi.fn().mockResolvedValue({ version: [2, 3000, 0], isLatest: true }),
         makeCacheableSignalKeyStore: vi.fn((_keys: any, _logger: any) => _keys),
         reset() {
             sockets.length = 0;
             this.makeWASocket.mockReset().mockImplementation(() => createSocket());
             this.fetchLatestBaileysVersion.mockReset().mockResolvedValue({ version: [2, 3000, 0] });
+            this.fetchLatestWaWebVersion.mockReset().mockResolvedValue({ version: [2, 3000, 0], isLatest: true });
             this.makeCacheableSignalKeyStore.mockReset().mockImplementation((_keys: any, _logger: any) => _keys);
         }
     };
@@ -38,6 +40,7 @@ const baileysMocks = vi.hoisted(() => {
 vi.mock('baileys', () => ({
     makeWASocket: baileysMocks.makeWASocket,
     fetchLatestBaileysVersion: baileysMocks.fetchLatestBaileysVersion,
+    fetchLatestWaWebVersion: baileysMocks.fetchLatestWaWebVersion,
     makeCacheableSignalKeyStore: baileysMocks.makeCacheableSignalKeyStore,
     DisconnectReason: {
         loggedOut: 401,
